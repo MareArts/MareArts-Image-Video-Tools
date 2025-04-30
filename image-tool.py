@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk, ImageDraw, ImageFilter
 import shutil
+import copy
 from typing import List, Dict, Tuple, Optional
 
 
@@ -12,6 +13,20 @@ class MosaicRegion:
         self.y1 = min(y1, y2)
         self.x2 = max(x1, x2)
         self.y2 = max(y1, y2)
+    
+    def __eq__(self, other):
+        if not isinstance(other, MosaicRegion):
+            return False
+        return (self.x1 == other.x1 and 
+                self.y1 == other.y1 and 
+                self.x2 == other.x2 and 
+                self.y2 == other.y2)
+
+
+class ImageState:
+    """Class to store the state of the image for undo/redo"""
+    def __init__(self, regions=None):
+        self.mosaic_regions = [] if regions is None else copy.deepcopy(regions)
 
 
 class ImageViewer(tk.Tk):
@@ -39,6 +54,11 @@ class ImageViewer(tk.Tk):
         self.modified = False
         self.resize_timer_id = None
         
+        # Undo/Redo stack
+        self.undo_stack = []
+        self.redo_stack = []
+        self.max_stack_size = 20  # Limit stack size to prevent memory issues
+        
         # Create UI components
         self._create_menu()
         self._create_toolbar()
@@ -53,6 +73,12 @@ class ImageViewer(tk.Tk):
         self.bind("<Delete>", lambda e: self.delete_image())
         self.bind("a", lambda e: self.move_to_subfolder("a"))
         self.bind("f", lambda e: self.move_to_subfolder("f"))
+        self.bind("<Control-z>", lambda e: self.undo())
+        self.bind("<Command-z>", lambda e: self.undo())  # For macOS
+        self.bind("<Control-y>", lambda e: self.redo())
+        self.bind("<Command-y>", lambda e: self.redo())  # For macOS
+        self.bind("<Control-Shift-Z>", lambda e: self.redo())  # Alternative redo shortcut
+        self.bind("<Command-Shift-Z>", lambda e: self.redo())  # For macOS
         
         # Bind window resize event
         self.bind("<Configure>", self.on_window_resize)
@@ -64,6 +90,57 @@ class ImageViewer(tk.Tk):
     def regain_focus(self):
         """Regain focus to the main window after dialogs"""
         self.after(100, lambda: [self.focus_force(), self.lift()])
+    
+    def save_state(self):
+        """Save the current state for undo functionality"""
+        # Save the state before making changes
+        current_state = ImageState(self.mosaic_regions)
+        self.undo_stack.append(current_state)
+        
+        # Clear redo stack when a new action is performed
+        self.redo_stack.clear()
+        
+        # Limit undo stack size
+        if len(self.undo_stack) > self.max_stack_size:
+            self.undo_stack.pop(0)
+    
+    def undo(self):
+        """Undo the last action"""
+        if not self.undo_stack:
+            self.status_var.set("Nothing to undo")
+            return
+            
+        # Save current state to redo stack
+        current_state = ImageState(self.mosaic_regions)
+        self.redo_stack.append(current_state)
+        
+        # Restore previous state
+        previous_state = self.undo_stack.pop()
+        self.mosaic_regions = previous_state.mosaic_regions
+        
+        # Update display
+        self.display_image()
+        self.modified = True if self.mosaic_regions else False
+        self.status_var.set("Undo successful")
+    
+    def redo(self):
+        """Redo the last undone action"""
+        if not self.redo_stack:
+            self.status_var.set("Nothing to redo")
+            return
+            
+        # Save current state to undo stack
+        current_state = ImageState(self.mosaic_regions)
+        self.undo_stack.append(current_state)
+        
+        # Restore next state
+        next_state = self.redo_stack.pop()
+        self.mosaic_regions = next_state.mosaic_regions
+        
+        # Update display
+        self.display_image()
+        self.modified = True if self.mosaic_regions else False
+        self.status_var.set("Redo successful")
     
     def on_window_resize(self, event):
         """Handle window resize event with debouncing"""
@@ -138,6 +215,9 @@ class ImageViewer(tk.Tk):
         
         # Edit menu
         edit_menu = tk.Menu(menu_bar, tearoff=0)
+        edit_menu.add_command(label="Undo", command=self.undo, accelerator="Ctrl+Z")
+        edit_menu.add_command(label="Redo", command=self.redo, accelerator="Ctrl+Y")
+        edit_menu.add_separator()
         edit_menu.add_command(label="Toggle Selection Tool", command=self.toggle_selection)
         edit_menu.add_command(label="Clear Mosaic Regions", command=self.clear_mosaic_regions)
         menu_bar.add_cascade(label="Edit", menu=edit_menu)
@@ -168,6 +248,12 @@ class ImageViewer(tk.Tk):
         
         ttk.Button(toolbar_frame, text="Previous", command=self.previous_image).pack(side=tk.LEFT, padx=2, pady=2)
         ttk.Button(toolbar_frame, text="Next", command=self.next_image).pack(side=tk.LEFT, padx=2, pady=2)
+        
+        ttk.Separator(toolbar_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=5, pady=2, fill=tk.Y)
+        
+        # Edit buttons
+        ttk.Button(toolbar_frame, text="Undo", command=self.undo).pack(side=tk.LEFT, padx=2, pady=2)
+        ttk.Button(toolbar_frame, text="Redo", command=self.redo).pack(side=tk.LEFT, padx=2, pady=2)
         
         ttk.Separator(toolbar_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=5, pady=2, fill=tk.Y)
         
@@ -283,6 +369,10 @@ class ImageViewer(tk.Tk):
         self.file_listbox.see(index)
         self.mosaic_regions = []
         self.modified = False
+        
+        # Clear undo/redo stacks when loading a new image
+        self.undo_stack.clear()
+        self.redo_stack.clear()
         
         # Load the image
         filename = self.image_files[index]
@@ -505,6 +595,9 @@ class ImageViewer(tk.Tk):
         x2 = max(0, min(img_width, int((x2 - x_offset) / scale)))
         y2 = max(0, min(img_height, int((y2 - y_offset) / scale)))
         
+        # Save current state before adding new region
+        self.save_state()
+        
         # Add the region to the list
         self.mosaic_regions.append(MosaicRegion(x1, y1, x2, y2))
         
@@ -518,11 +611,18 @@ class ImageViewer(tk.Tk):
     
     def clear_mosaic_regions(self):
         """Clear all mosaic regions"""
-        if self.mosaic_regions:
-            self.mosaic_regions = []
-            self.display_image()
-            self.modified = True
-            self.status_var.set("Cleared all mosaic regions")
+        if not self.mosaic_regions:
+            self.status_var.set("No regions to clear")
+            return
+            
+        # Save state before clearing
+        self.save_state()
+        
+        # Clear regions
+        self.mosaic_regions = []
+        self.display_image()
+        self.modified = False
+        self.status_var.set("Cleared all mosaic regions")
     
     def save_image(self):
         """Save the image with applied effects"""
@@ -812,6 +912,9 @@ class ImageViewer(tk.Tk):
             "- Page Up: Previous image\n"
             "- Page Down: Next image\n"
             "- Up/Down Arrows: Navigate file list\n\n"
+            "Edit:\n"
+            "- Ctrl+Z: Undo\n"
+            "- Ctrl+Y or Ctrl+Shift+Z: Redo\n\n"
             "File Operations:\n"
             "- Ctrl+S or Command+S: Save image\n"
             "- Delete: Delete current image\n"
@@ -832,6 +935,7 @@ class ImageViewer(tk.Tk):
             "- Browse image folders\n"
             "- Navigate with keyboard shortcuts (Page Up/Down)\n"
             "- Apply mosaic effect to selected regions\n"
+            "- Undo/Redo functionality (Ctrl+Z/Ctrl+Y)\n"
             "- Save, move, and delete images\n"
             "- Quick folder organization with 'a' and 'f' keys\n\n"
             "Save shortcut: Ctrl+S (Windows/Linux) or Command+S (macOS)"
